@@ -1,0 +1,1049 @@
+================================================================================
+   LOCAL MISTRAL CHATBOT v0.2 — COMPLETE LEARNING GUIDE
+   Files, Concepts, and Logic Explained
+================================================================================
+
+Created for: Learning GenAI Engineering with LangChain + Mistral + Streamlit
+Project: C:\Users\LENOVO\Desktop\ChatBot
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  TABLE OF CONTENTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  PART 1 — THE BIG PICTURE
+    1.1  What the App Does
+    1.2  How Data Flows Through the App
+    1.3  Why This Architecture
+
+  PART 2 — CORE CONCEPTS (Read This First!)
+    2.1  What is a GGUF Model?
+    2.2  What is Quantization?
+    2.3  What is llama.cpp?
+    2.4  What is LangChain?
+    2.5  What is LCEL?
+    2.6  What is a Prompt Template?
+    2.7  What is Conversation Memory?
+    2.8  What is an Output Parser?
+    2.9  What is Streaming?
+    2.10 What is Streamlit?
+    2.11 What is session_state?
+
+  PART 3 — FILE BY FILE EXPLANATION
+    3.1  src/config.py
+    3.2  src/llm.py
+    3.3  src/prompts.py
+    3.4  src/memory.py
+    3.5  src/chains.py
+    3.6  src/parsers.py
+    3.7  src/utils.py
+    3.8  app.py
+    3.9  pyproject.toml
+    3.10 .env / .env.example
+
+  PART 4 — HOW IT ALL WORKS TOGETHER (Step-by-Step Message Flow)
+
+  PART 5 — RAG READINESS (What Changes in v0.3)
+
+  PART 6 — GLOSSARY OF KEY TERMS
+
+
+================================================================================
+  PART 1 — THE BIG PICTURE
+================================================================================
+
+--------------------------------------------------------------------------------
+1.1  WHAT THE APP DOES
+--------------------------------------------------------------------------------
+
+This application is a LOCAL AI chatbot. "Local" means:
+- The AI model runs on YOUR computer's CPU and RAM
+- Your messages never leave your machine
+- No internet connection is needed after the model is downloaded
+- No API key or cloud subscription is required
+
+The user opens a web browser, types a message, and sees the AI respond
+word by word (streaming). The AI remembers the entire conversation
+(multi-turn memory) until the user clicks "New Chat".
+
+--------------------------------------------------------------------------------
+1.2  HOW DATA FLOWS THROUGH THE APP
+--------------------------------------------------------------------------------
+
+  User types a message
+         |
+         v
+  [Streamlit UI — app.py]
+  - Validates the input (not empty, not too long)
+  - Saves message to display list (for UI rendering)
+  - Saves message to LangChain history (for model context)
+         |
+         v
+  [Memory — src/memory.py]
+  - Retrieves trimmed conversation history (last N turns)
+  - Returns list of HumanMessage and AIMessage objects
+         |
+         v
+  [Chain — src/chains.py]
+  - Calls chain.stream({ history: [...], input: "user message" })
+  - The LCEL pipe operator routes data through 3 stages:
+         |
+         v
+  [Prompt Template — src/prompts.py]
+  - Inserts system prompt at the top
+  - Inserts past conversation history in the middle
+  - Inserts the new user message at the bottom
+  - Formats everything into the Mistral Instruct [INST]...[/INST] format
+         |
+         v
+  [LLM — src/llm.py → LlamaCpp → llama.cpp C++ engine]
+  - Receives the fully formatted prompt
+  - Runs inference on your CPU (Q3_K_S quantized weights)
+  - Generates and STREAMS tokens one by one
+         |
+         v
+  [Parser — src/parsers.py]
+  - Receives each raw token from the LLM
+  - Strips any formatting artifacts
+  - Returns a clean string
+         |
+         v
+  [Streamlit UI — app.py]
+  - Receives each token chunk from chain.stream()
+  - Appends it to the displayed response bubble
+  - Shows blinking cursor effect while generating
+  - When done, saves full response to conversation history
+
+--------------------------------------------------------------------------------
+1.3  WHY THIS ARCHITECTURE (Modular Design)
+--------------------------------------------------------------------------------
+
+The project is split into small, focused modules instead of one big file.
+This is called "Separation of Concerns". Benefits:
+
+  ┌─────────────────┬──────────────────────────────────────────────────────┐
+  │ Module          │ Only responsible for...                              │
+  ├─────────────────┼──────────────────────────────────────────────────────┤
+  │ config.py       │ Settings and constants                               │
+  │ llm.py          │ Loading the model                                    │
+  │ prompts.py      │ Formatting the prompt                                │
+  │ memory.py       │ Storing conversation history                         │
+  │ chains.py       │ Connecting everything into a pipeline                │
+  │ parsers.py      │ Cleaning the model's raw output                      │
+  │ utils.py        │ Helper functions (validation, checks)                │
+  │ app.py          │ ONLY the Streamlit UI                                │
+  └─────────────────┴──────────────────────────────────────────────────────┘
+
+If you want to change the UI → edit only app.py
+If you want a different model → edit only llm.py and config.py
+If you want to add RAG → edit only chains.py and prompts.py
+
+
+================================================================================
+  PART 2 — CORE CONCEPTS (Read This First!)
+================================================================================
+
+--------------------------------------------------------------------------------
+2.1  WHAT IS A GGUF MODEL?
+--------------------------------------------------------------------------------
+
+GGUF stands for "GPT-Generated Unified Format".
+
+Think of it like this:
+  - The original Mistral 7B model is trained with 7 billion parameters
+  - Each parameter is normally stored as a 16-bit or 32-bit float number
+  - 7 billion × 16-bit = ~14 GB — too large for most consumer machines
+
+  GGUF solves this by packing the model into a special binary file format
+  that llama.cpp can load and run efficiently.
+
+Why GGUF specifically?
+  - It is the current standard format for local LLM inference
+  - It replaced the older GGML format
+  - It stores ALL model information in one file (weights + metadata)
+  - It is cross-platform (Windows, Mac, Linux all use the same file)
+
+Our file: mistral-7b-instruct-v0.2.Q3_K_S.gguf (~3.1 GB)
+
+--------------------------------------------------------------------------------
+2.2  WHAT IS QUANTIZATION?
+--------------------------------------------------------------------------------
+
+Quantization = making the model smaller by reducing number precision.
+
+Original training precision:
+  float32 = 32 bits per parameter → huge, slow on CPU
+
+Quantization example:
+  Q4_K_M → each weight uses ~4 bits instead of 32 bits → 8x smaller
+
+The "Q3_K_S" in our model name means:
+  Q3 = approximately 3 bits per weight
+  K  = uses a method called "K-quant" (smarter grouping of weights)
+  S  = Small variant (fewer bits in certain key layers)
+
+Trade-off table:
+  Q8_0   → closest to original quality, needs ~9 GB RAM  (too large for us)
+  Q4_K_M → very good quality,          needs ~5.5 GB RAM (risky for us)
+  Q3_K_S → good quality,               needs ~4 GB RAM   (our choice ✓)
+  Q2_K   → acceptable quality,         needs ~3.5 GB RAM (safe fallback)
+
+For a conversational chatbot, Q3_K_S produces excellent results.
+The quality difference vs Q4_K_M is barely noticeable in normal conversation.
+
+--------------------------------------------------------------------------------
+2.3  WHAT IS LLAMA.CPP?
+--------------------------------------------------------------------------------
+
+llama.cpp is a C++ library written by Georgi Gerganov that allows running
+LLMs (large language models) efficiently on a CPU without needing GPU.
+
+Key facts:
+  - Written in pure C/C++ with no Python or CUDA required to RUN it
+  - Uses CPU-specific SIMD instructions (AVX2/AVX512) to go faster
+  - Can also offload some layers to GPU if you have one (we use 0 GPU layers)
+  - llama-cpp-python = Python "wrapper" that lets us call llama.cpp from Python
+
+How it works in our app:
+  - LangChain's LlamaCpp class talks to llama-cpp-python
+  - llama-cpp-python talks to the llama.cpp C++ engine
+  - The C++ engine reads the .gguf file and runs inference
+  - Generated tokens come back up through the chain
+
+Expected performance on your machine (i7-1355U, CPU only):
+  - ~3 to 8 tokens per second
+  - For a 200-word response → about 30–60 seconds
+  - This is NORMAL for CPU-only inference — not a bug
+
+--------------------------------------------------------------------------------
+2.4  WHAT IS LANGCHAIN?
+--------------------------------------------------------------------------------
+
+LangChain is a Python framework for building applications with LLMs.
+
+Without LangChain, you would manually:
+  - Format the prompt string yourself
+  - Call the model
+  - Parse the output string
+  - Manage conversation history as a list
+  - Wire everything together with custom code
+
+With LangChain, you use standardized abstractions:
+  - ChatPromptTemplate → handles prompt formatting
+  - LlamaCpp → standardized LLM interface
+  - ChatMessageHistory → standardized memory
+  - StrOutputParser → standardized output cleaning
+  - LCEL (|) → standardized pipeline composition
+
+The key benefit: if you want to switch from Mistral to GPT-4 or Claude,
+you only change one line (the LLM class). Everything else stays the same.
+
+LangChain packages used in this project:
+  langchain-core         → base classes (Runnable, Messages, Parsers)
+  langchain-community    → LlamaCpp integration
+  langchain              → high-level abstractions
+
+--------------------------------------------------------------------------------
+2.5  WHAT IS LCEL?
+--------------------------------------------------------------------------------
+
+LCEL = LangChain Expression Language
+
+It is a way to build pipelines using Python's pipe operator: |
+
+Example from our code:
+  chain = prompt | llm | parser
+
+This means:
+  Step 1: Take the input dict → pass it through the prompt template
+  Step 2: Take the formatted prompt → pass it through the LLM
+  Step 3: Take the raw LLM output → pass it through the parser
+
+Each component (prompt, llm, parser) is a "Runnable" — an object that has:
+  .invoke(input)  → run once, return complete result
+  .stream(input)  → run and yield tokens as they're generated
+  .batch(inputs)  → run multiple inputs in parallel
+
+When you call chain.stream(), LCEL automatically passes the stream
+through all three components, so tokens flow from llm → parser → your app
+one at a time, in real time.
+
+Why LCEL matters for v0.3 RAG:
+  v0.2 chain:  prompt | llm | parser
+  v0.3 chain:  {"context": retriever, ...} | prompt | llm | parser
+  (Only one line changes — the rest is identical)
+
+--------------------------------------------------------------------------------
+2.6  WHAT IS A PROMPT TEMPLATE?
+--------------------------------------------------------------------------------
+
+A prompt template is a reusable "blueprint" for building prompts.
+
+Instead of building the prompt string manually every time:
+  prompt = f"[INST] {system_prompt}\n\nUser: {user_message} [/INST]"
+
+We define a template ONCE and fill in variables at runtime:
+  template = ChatPromptTemplate.from_messages([
+      ("system", "{system_text}"),
+      MessagesPlaceholder("history"),
+      ("human", "{input}")
+  ])
+
+Why templates are better:
+  - No string formatting bugs
+  - Easy to update without touching the chain
+  - Variables are named and explicit
+  - LangChain validates the input keys
+
+MISTRAL INSTRUCT FORMAT:
+  Mistral 7B Instruct was trained with a specific conversation format:
+    <s>[INST] System message + first user message [/INST]
+    First assistant response </s>
+    [INST] Second user message [/INST]
+    Second assistant response </s>
+
+  LangChain's ChatPromptTemplate automatically converts our:
+    SystemMessage → HumanMessage → AIMessage → HumanMessage
+  into the correct [INST]...[/INST] format that Mistral understands.
+
+--------------------------------------------------------------------------------
+2.7  WHAT IS CONVERSATION MEMORY?
+--------------------------------------------------------------------------------
+
+LLMs have NO memory by default. Every call is completely independent.
+
+If you call the LLM with just "What is my name?", it has no idea.
+It needs the FULL context: "User said 'My name is Ali.' → You replied
+'Nice to meet you, Ali.' → User now asks 'What is my name?'"
+
+How we implement memory:
+
+  1. We maintain a ChatMessageHistory object (a list of messages)
+  2. After EVERY user message: add HumanMessage to the list
+  3. After EVERY AI response: add AIMessage to the list
+  4. Before EVERY new LLM call: pass the entire list to the template
+
+  The template puts it in MessagesPlaceholder("history"), so the model
+  sees ALL previous turns as part of the current prompt.
+
+Example prompt the model actually receives:
+  [INST] You are a helpful assistant.
+
+  User: My name is Ali.
+  [/INST]
+  Nice to meet you, Ali!
+  [INST] What is my name? [/INST]
+
+Context trimming:
+  Each token in history takes up context window space.
+  Our model has a 4096-token context window.
+  We keep only the LAST 10 turns (20 messages) to stay within this limit.
+  Older turns are automatically dropped.
+
+Storage in our app: Python dictionary (st.session_state)
+  - Lives only in RAM while the app is running
+  - Cleared when user clicks "New Chat" or refreshes
+  - In v0.3, could be replaced with SQLite for persistent memory
+
+--------------------------------------------------------------------------------
+2.8  WHAT IS AN OUTPUT PARSER?
+--------------------------------------------------------------------------------
+
+When the LLM generates a response, LangChain returns it as an AIMessage object:
+  AIMessage(content="Hello! How can I help you?", ...)
+
+For our UI, we just need the plain string: "Hello! How can I help you?"
+
+StrOutputParser() does exactly this — extracts the .content string from
+AIMessage objects and also handles any trailing whitespace cleanup.
+
+Three levels of output:
+  Raw LLM output:    AIMessage(content="Hello!\n\n", additional_kwargs={...})
+  Parsed string:     "Hello!"
+  Structured output: {"answer": "Hello!", "confidence": "high"}  ← not used
+
+For basic chat, StrOutputParser is always the right choice.
+For structured data extraction (e.g. filling forms), you would use
+JsonOutputParser or a Pydantic-based parser.
+
+--------------------------------------------------------------------------------
+2.9  WHAT IS STREAMING?
+--------------------------------------------------------------------------------
+
+Without streaming:
+  User sends message → waits 30 seconds → sees complete response appear
+
+With streaming:
+  User sends message → sees "M" after 1 second → "Mi" → "Mis" → "Mist" → ...
+
+This dramatically improves perceived performance. The model is working at
+the same speed either way, but the user experience feels much faster.
+
+How it works technically:
+  - LlamaCpp has streaming=True set in llm.py
+  - chain.stream() is called instead of chain.invoke()
+  - chain.stream() returns a Python Generator (yields chunks)
+  - Each chunk is a string (one or more tokens)
+  - app.py iterates the generator: for chunk in chain.stream(...)
+  - Each iteration updates the Streamlit placeholder with the growing text
+  - A blinking ▌ cursor is appended to show "still generating"
+
+Key rule: Never fake streaming by generating the full response first
+and then splitting it into words. That defeats the purpose.
+
+--------------------------------------------------------------------------------
+2.10 WHAT IS STREAMLIT?
+--------------------------------------------------------------------------------
+
+Streamlit is a Python library that turns Python scripts into web apps.
+
+You write Python code like:
+  st.title("My App")
+  st.write("Hello world")
+  name = st.text_input("Your name")
+  if st.button("Click me"):
+      st.write(f"Hello, {name}!")
+
+And Streamlit automatically:
+  - Creates a web server
+  - Renders HTML/CSS/JavaScript in the browser
+  - Handles user interactions
+  - Re-runs your Python script on every interaction
+
+Important behavior:
+  Streamlit re-runs the ENTIRE Python script from top to bottom
+  every single time the user does anything (clicks, types, etc.).
+  This is why session_state is needed to preserve data between re-runs.
+
+st.cache_resource:
+  This decorator tells Streamlit: "This function is expensive to run.
+  Call it only once, cache the result, and return the same result forever."
+  We use it in llm.py to load the model only once (not every re-run).
+
+st.chat_input:
+  Streamlit's built-in chat input widget — creates the text box at the bottom.
+
+st.empty():
+  Creates a placeholder that can be updated (overwritten) repeatedly.
+  We use this for the streaming effect — update the same placeholder
+  with growing text on every new token.
+
+--------------------------------------------------------------------------------
+2.11 WHAT IS SESSION STATE?
+--------------------------------------------------------------------------------
+
+st.session_state is a Python dictionary-like object that PERSISTS between
+Streamlit re-runs within the same browser session.
+
+Without session_state:
+  User types → Streamlit reruns → all Python variables reset → history lost!
+
+With session_state:
+  User types → Streamlit reruns → st.session_state.display_messages still
+  has all previous messages → history preserved!
+
+What we store in session_state:
+  display_messages   → list of {"role": ..., "content": ...} for UI rendering
+  message_history    → ChatMessageHistory object for LangChain context
+  temperature        → current temperature slider value
+  max_tokens         → current max tokens slider value
+  system_prompt      → current system prompt text
+  llm                → the loaded LlamaCpp model object (expensive!)
+  chain              → the current LCEL chain
+  model_loaded       → boolean flag
+
+Note: st.cache_resource (for llm) and st.session_state (for history) serve
+different purposes. cache_resource is shared across ALL sessions.
+session_state is unique to EACH browser tab/session.
+
+
+================================================================================
+  PART 3 — FILE BY FILE EXPLANATION
+================================================================================
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3.1  FILE: src/config.py
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+PURPOSE: Single source of truth for all configuration values.
+
+CONCEPTS USED:
+  - python-dotenv: reads key=value pairs from .env file into os.environ
+  - os.getenv(): reads an environment variable with a fallback default
+  - pathlib.Path: object-oriented file path handling (cross-platform)
+  - Module-level constants: variables defined at the top of the module
+
+KEY VARIABLES AND WHY:
+  MODEL_PATH         → Full path to the .gguf file. Never hard-coded.
+  MODEL_QUANTIZATION → Display label (Q3_K_S). Used in sidebar.
+  DEFAULT_TEMPERATURE → 0.7 (balanced creativity). User can change via slider.
+  DEFAULT_MAX_TOKENS  → 512 tokens (~380 words). Enough for most responses.
+  MODEL_CONTEXT_SIZE  → 4096 tokens. Safe limit for our 7.7 GB RAM machine.
+  N_THREADS           → 8. Number of CPU cores for inference (i7-1355U has 10).
+  N_GPU_LAYERS        → 0. Intel UHD is integrated — no VRAM, so CPU only.
+  MAX_HISTORY_TURNS   → 10 turns (20 messages) kept in context.
+
+WHY USE .env FILE?
+  Avoid hard-coding machine-specific paths in Python files.
+  If someone else uses this project, they just change their .env —
+  no Python code changes needed.
+
+LEARNING EXERCISE:
+  Try changing DEFAULT_TEMPERATURE to 0.0 in .env, restart the app,
+  ask the same question twice. Both answers should be nearly identical.
+  Then change to 1.2 and notice much more varied responses.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3.2  FILE: src/llm.py
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+PURPOSE: Load the local Mistral model and configure it.
+
+CONCEPTS USED:
+  - @st.cache_resource: Streamlit decorator for expensive one-time objects
+  - LlamaCpp: LangChain's class for llama.cpp-based local LLMs
+  - Model parameters: n_ctx, n_threads, n_gpu_layers, temperature, streaming
+  - Exception handling: FileNotFoundError, RuntimeError with helpful messages
+
+KEY PARAMETERS EXPLAINED:
+  model_path    → Where to find the .gguf file
+  temperature   → Randomness (0.0 = deterministic, 1.5 = very random)
+  max_tokens    → How many tokens to generate (not input tokens — OUTPUT)
+  n_ctx         → Context window: total tokens of input+history+output allowed
+  n_threads     → CPU cores dedicated to inference math
+  n_gpu_layers  → How many transformer layers to put on GPU (0 = all on CPU)
+  streaming     → True = yield tokens one by one instead of all at once
+  stop          → List of sequences that signal the model to stop generating
+                  ["</s>", "[INST]", "[/INST]"] are Mistral's stop tokens
+
+WHY @st.cache_resource?
+  Loading the model allocates ~4 GB of RAM and reads 3.1 GB from disk.
+  This takes 10–30 seconds. Without caching, it would happen on EVERY
+  Streamlit re-run (every user message). With caching, it happens ONCE.
+  The cached model object is shared across the entire Streamlit server process.
+
+WHY stop tokens?
+  Without stop tokens, Mistral sometimes continues generating after its answer,
+  trying to simulate the next human turn. The stop tokens tell llama.cpp:
+  "If you see </s> or [INST], stop immediately and return what you have."
+
+LEARNING EXERCISE:
+  Set verbose=True in LlamaCpp(). Restart and send a message.
+  You will see llama.cpp's internal debug output in the terminal,
+  showing model layer loading, token generation speeds, etc.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3.3  FILE: src/prompts.py
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+PURPOSE: Build the prompt template that structures every conversation.
+
+CONCEPTS USED:
+  - ChatPromptTemplate: LangChain's structured prompt builder
+  - MessagesPlaceholder: A slot for a dynamic list of messages
+  - Message types: ("system", ...), ("human", ...), ("ai", ...)
+  - Mistral Instruct format: [INST]...[/INST]
+
+TEMPLATE STRUCTURE:
+  1. ("system", system_prompt)
+     → Becomes the opening [INST] block: tells model how to behave
+     → This is like the "role" you give to an AI (ChatGPT's "You are...")
+
+  2. MessagesPlaceholder(variable_name="history")
+     → At runtime, this expands into ALL previous HumanMessage + AIMessage pairs
+     → Gives the model full conversation context
+
+  3. ("human", "{input}")
+     → The current user's new message
+     → {input} is filled in at chain invocation time
+
+AT RUNTIME, the rendered prompt looks like:
+  <s>[INST] You are a helpful AI assistant running locally...
+
+  My name is Ali. [/INST]
+  Nice to meet you, Ali!
+  </s>[INST] What is my name? [/INST]
+
+LEARNING EXERCISE:
+  Add a line to the system prompt: "Always end your response with a fun fact."
+  Test it. Notice how the model now consistently adds facts at the end.
+  This demonstrates how powerful the system prompt is for controlling behavior.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3.4  FILE: src/memory.py
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+PURPOSE: Manage conversation history for multi-turn chat.
+
+CONCEPTS USED:
+  - ChatMessageHistory: LangChain's standard conversation history container
+  - HumanMessage / AIMessage: Typed message objects
+  - List slicing: history[-20:] to keep only the most recent messages
+  - Session state integration: history stored in st.session_state
+
+KEY FUNCTIONS:
+  create_message_history()         → Creates an empty history (new chat)
+  add_user_message(history, text)  → Appends HumanMessage
+  add_ai_message(history, text)    → Appends AIMessage
+  get_trimmed_messages(history)    → Returns last 20 messages (10 turns)
+  clear_history(history)           → Empties the history (New Chat button)
+  get_turn_count(history)          → Returns number of complete turns
+  format_history_for_display()     → Converts to {role, content} dicts for UI
+
+WHY TRIM HISTORY?
+  Imagine a 30-turn conversation. Each message might be 100 tokens.
+  30 turns × 2 messages × 100 tokens = 6000 tokens just for history.
+  Our context window is 4096. It would OVERFLOW and crash.
+
+  By keeping only the last 10 turns, we guarantee the history + current
+  message + system prompt + response always fits in 4096 tokens.
+
+WHAT GETS LOST WHEN TRIMMING?
+  Very early conversation context. The model forgets what was said in turn 1
+  once you've had 11+ turns. This is a known limitation of context-window
+  based memory. v0.3 could use a "summarization" approach instead.
+
+LEARNING EXERCISE:
+  Change MAX_HISTORY_TURNS to 2 in config.py.
+  Have a long conversation. Notice the model "forgetting" early context.
+  Then change to 20. Notice it remembers much more (but generation gets slower).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3.5  FILE: src/chains.py
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+PURPOSE: Build the LCEL pipeline that connects prompt → model → parser.
+
+CONCEPTS USED:
+  - LCEL pipe operator (|): Compose Runnables left to right
+  - RunnableSerializable: Base type for all LCEL chains
+  - Python Generator: stream_response() uses "yield" to send tokens one by one
+  - Exception handling: Catches RuntimeError from inference failures
+
+KEY FUNCTIONS:
+
+  get_chain(llm, system_prompt)
+    - Builds and returns the chain: prompt | llm | parser
+    - Called once when the app loads, stored in session_state
+    - Called again when user changes system_prompt or parameters
+
+  stream_response(chain, user_input, history)
+    - Calls chain.stream({"history": history, "input": user_input})
+    - Iterates the generator and yields each chunk
+    - app.py calls this function and iterates its results
+
+  invoke_response(chain, user_input, history)
+    - Non-streaming version (for testing/debugging)
+    - Returns the complete string at once
+
+UNDERSTANDING THE INPUT DICT:
+  When we call chain.stream({"history": [...], "input": "Hello"}):
+    - "history" matches MessagesPlaceholder(variable_name="history")
+    - "input"   matches ("human", "{input}") in the template
+  The key names MUST match the variable names in the prompt template.
+
+RAG READINESS EXPLAINED:
+  Currently (v0.2):
+    chain = prompt | llm | parser
+    inputs = {"history": [...], "input": "user message"}
+
+  In v0.3 with RAG:
+    chain = {"context": retriever, "history": pass, "input": pass} | prompt | llm | parser
+    inputs = {"history": [...], "input": "user message"}
+    (The retriever automatically uses the input to search for documents
+     and fills in "context" before the prompt template runs)
+
+LEARNING EXERCISE:
+  In a Python REPL, run:
+    from src.chains import invoke_response, get_chain
+    from src.llm import load_llm
+    llm = load_llm()
+    chain = get_chain(llm)
+    result = invoke_response(chain, "What is 2+2?", [])
+    print(result)
+  This tests the chain completely independently of Streamlit.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3.6  FILE: src/parsers.py
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+PURPOSE: Parse the model's raw output into a clean string.
+
+CONCEPTS USED:
+  - StrOutputParser: LangChain's standard string output parser
+  - Output parser types (educational):
+      StrOutputParser     → clean string (we use this)
+      JsonOutputParser    → Python dict from JSON output
+      PydanticOutputParser → typed Pydantic model from JSON output
+
+KEY FUNCTIONS:
+  get_string_parser()   → Returns StrOutputParser() instance
+
+WHY EVEN HAVE A parsers.py FILE?
+  For chat, StrOutputParser feels trivial. But having a dedicated module:
+  1. Makes the architecture consistent — everything has its place
+  2. Makes it easy to add structured output later without touching other files
+  3. Makes the LCEL chain explicit: each | stage has a clear purpose
+
+WHAT StrOutputParser ACTUALLY DOES:
+  - If input is AIMessage: extracts .content string
+  - If input is str: returns it unchanged
+  - Strips leading/trailing whitespace
+
+LEARNING EXERCISE:
+  In the parsers.py file, read the "EDUCATIONAL SECTION" comment at the bottom.
+  It shows exactly how you would add a structured output parser.
+  This is useful for building AI apps that return structured data
+  (e.g., "extract the person's name and email from this text").
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3.7  FILE: src/utils.py
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+PURPOSE: Helper functions that don't belong in any specific module.
+
+CONCEPTS USED:
+  - pathlib.Path: File existence checks
+  - platform module: OS, CPU info
+  - typing.Tuple: Return type hints for (bool, str) pairs
+  - re module: Regular expressions for cleaning response text
+
+KEY FUNCTIONS:
+
+  check_model_exists()
+    → Checks if the .gguf file exists at the configured path
+    → Returns (True, "size info") or (False, "download instructions")
+    → Called in app.py before attempting to load the model
+
+  estimate_ram_warning()
+    → Optional: checks available RAM vs model requirements
+    → Returns warning string if RAM is tight
+
+  validate_temperature(value)
+    → Returns (True, "OK") or (False, "error message")
+    → Range: 0.0 to 2.0
+
+  validate_user_input(text)
+    → Checks input is not empty and not too long (>4000 chars)
+
+  format_file_size(bytes)
+    → Converts 3100000000 → "3.1 GB"
+
+  get_system_info()
+    → Returns dict with OS name, Python version, CPU cores
+
+  clean_model_response(text)
+    → Strips Mistral's stop tokens if they leak through
+    → Collapses excessive newlines
+
+PATTERN — RETURNING (bool, str):
+  Many functions return a Tuple[bool, str].
+  This is a clean pattern where:
+    - bool = did it succeed?
+    - str  = either a success message or an error message
+  
+  Example usage in app.py:
+    is_valid, error_msg = validate_user_input(user_input)
+    if not is_valid:
+        st.warning(error_msg)
+        st.stop()
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3.8  FILE: app.py  (THE MAIN STREAMLIT FILE)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+PURPOSE: Streamlit UI layer — the only file with st.* calls.
+
+CONCEPTS USED:
+  - st.set_page_config: Must be FIRST Streamlit call. Sets tab title, icon, layout.
+  - st.session_state: Persists data across Streamlit re-runs
+  - st.cache_resource: Loads expensive resources (model) only once
+  - st.markdown(unsafe_allow_html=True): Inject custom HTML/CSS
+  - st.sidebar: A collapsible sidebar panel
+  - st.slider: Interactive slider for temperature/tokens
+  - st.text_area: Multi-line text input for system prompt
+  - st.chat_input: Bottom chat input box (Streamlit's native chat widget)
+  - st.empty(): A placeholder that can be updated repeatedly (used for streaming)
+  - st.rerun(): Restarts the Streamlit script from the top
+  - st.stop(): Immediately stops further script execution
+  - st.spinner(): Shows a "Loading..." indicator
+
+STRUCTURE OF app.py:
+  1. inject_custom_css()     → Injects all CSS styles into <head>
+  2. init_session_state()    → Sets defaults for all session_state keys
+  3. render_sidebar()        → Draws the left panel (model info, sliders, etc.)
+  4. render_user_message()   → Renders one user message bubble in HTML
+  5. render_assistant_message() → Renders one assistant message bubble
+  6. render_chat_history()   → Loops through display_messages and renders each
+  7. render_empty_state()    → Shows "Start a conversation" when chat is empty
+  8. ensure_model_loaded()   → Loads model if not already loaded
+  9. main()                  → Orchestrates everything: header → sidebar →
+                               model load → chat area → input → streaming
+
+THE STREAMING LOOP IN DETAIL (app.py lines ~655-700):
+  
+  1. Check if last message was from user (no AI reply yet)
+  2. Show "Mistral is thinking..." animated dots
+  3. Create st.empty() placeholder for the response
+  4. Get trimmed history (without the current user message)
+  5. Call stream_response() → returns a generator
+  6. Loop: for token in stream_response(...):
+           full_response += token
+           placeholder.markdown(full_response + "▌")  ← cursor effect
+  7. Clear the thinking indicator
+  8. Clean the response (remove stop tokens)
+  9. Show final response (no cursor)
+  10. Add AI response to history
+  11. Call st.rerun() to properly re-render the complete conversation
+
+WHY st.rerun() AT THE END?
+  After streaming, the response is in a st.empty() placeholder.
+  We call st.rerun() to rebuild the page "properly" with the message
+  rendered through render_chat_history() (the permanent display system).
+  The st.empty() placeholder disappears and the proper bubble appears.
+
+CSS CUSTOMIZATION:
+  The inject_custom_css() function inserts a <style> block with:
+  - Dark gradient background (#0f0f1a → #1a1a2e → #16213e)
+  - User messages: purple gradient bubble, right-aligned, slide-in animation
+  - Assistant messages: semi-transparent dark bubble, left-aligned
+  - Animated status dot in sidebar (pulsing green dot = model active)
+  - Animated thinking indicator (three bouncing dots)
+  - Custom sidebar background and button styles
+  - Inter font from Google Fonts
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3.9  FILE: pyproject.toml
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+PURPOSE: Project metadata and dependency declarations for uv/pip.
+
+CONCEPTS USED:
+  - TOML format: Tom's Obvious Minimal Language — key=value config format
+  - PEP 517/518: Python standard for build systems
+  - Version specifiers: ">=0.3" means "version 0.3 or higher"
+  - dependency-groups: Separate dev dependencies from runtime
+
+KEY SECTIONS:
+  [project]           → Name, version, Python requirement, runtime deps
+  [dependency-groups] → Dev-only tools (ruff linter, pytest)
+  [build-system]      → Uses hatchling to build the package
+  [tool.ruff]         → Linter configuration (line length, Python target)
+
+WHY uv INSTEAD OF pip?
+  uv is a modern, Rust-based Python package manager that is:
+  - 10–100x faster than pip for resolving and installing packages
+  - Handles virtual environments automatically
+  - Produces reproducible installs via a lockfile (uv.lock)
+  - Becoming the industry standard for Python projects
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3.10 FILES: .env / .env.example
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+PURPOSE: Store configuration that varies per machine or per user.
+
+.env         → YOUR personal settings (gitignored — never committed)
+.env.example → Template with placeholder values (committed to git)
+
+RULE: NEVER commit .env to git.
+  If you did, your API keys and personal paths would be public.
+  The .gitignore file contains ".env" to prevent accidental commits.
+
+PYTHON-DOTENV:
+  The line "load_dotenv()" in config.py reads .env and injects all
+  key=value pairs into os.environ. Then os.getenv("KEY") reads them.
+
+
+================================================================================
+  PART 4 — HOW IT ALL WORKS TOGETHER
+  (Complete Step-by-Step Message Flow)
+================================================================================
+
+Let's trace exactly what happens when you type "Hello" and press Enter:
+
+  STEP 1 — Streamlit re-runs app.py from the top
+    - inject_custom_css() → styles applied
+    - init_session_state() → existing values preserved
+    - render_sidebar() → sidebar re-rendered
+
+  STEP 2 — ensure_model_loaded() is called
+    - check_model_exists() → model file found ✓
+    - load_llm() is called BUT @st.cache_resource returns the cached model
+      (model is NOT reloaded — just retrieved from cache)
+    - get_chain(llm, system_prompt) → chain re-built if parameters changed
+
+  STEP 3 — Chat area rendered
+    - st.session_state.display_messages is not empty (has past messages)
+    - render_chat_history() draws all previous bubbles
+
+  STEP 4 — user_input = st.chat_input(...)
+    - Streamlit returns "Hello" (the text just typed)
+    - This triggers another re-run with the input available
+
+  STEP 5 — Input validation
+    - validate_user_input("Hello") → (True, "OK") → passes
+
+  STEP 6 — Save user message
+    - display_messages.append({"role": "user", "content": "Hello"})
+    - add_user_message(history, "Hello")
+      → history.messages now has [..., HumanMessage("Hello")]
+
+  STEP 7 — st.rerun() called
+    - Streamlit re-renders, showing "Hello" bubble
+    - Last message in display_messages is from user → triggers streaming
+
+  STEP 8 — Streaming begins
+    - trimmed_history = get_trimmed_messages(history)
+      → Returns [...previous messages..., HumanMessage("Hello")]
+    - context_history = trimmed_history[:-1]
+      → All messages EXCEPT the current "Hello"
+      → [... previous messages only ...]
+
+  STEP 9 — chain.stream() called
+    inputs = {
+        "history": [... previous messages ...],
+        "input":   "Hello"
+    }
+    
+    LCEL pipe stage 1 — Prompt Template:
+      - Formats system prompt as [INST] block
+      - Expands history messages into [INST]/[/INST] pairs
+      - Adds "Hello" as the final [INST] human message
+      - Returns: a PromptValue object (the fully formatted prompt string)
+
+    LCEL pipe stage 2 — LlamaCpp LLM:
+      - Sends the formatted prompt string to llama.cpp
+      - llama.cpp reads the quantized weights and runs inference
+      - Starts STREAMING tokens: "Hi", " there", "!", " How", " can", " I", ...
+
+    LCEL pipe stage 3 — StrOutputParser:
+      - Receives each token chunk as it arrives from the LLM
+      - Extracts the string content
+      - Yields it to the caller
+
+  STEP 10 — app.py receives tokens
+    - for chunk in chain.stream(inputs):
+          full_response += chunk   → "Hi" → "Hi there" → "Hi there!" → ...
+          placeholder.markdown(full_response + "▌")  → updates bubble
+
+  STEP 11 — Generation complete
+    - LLM returns stop token → stream ends
+    - thinking_placeholder.empty() → removes animated dots
+    - full_response = clean_model_response(full_response)
+    - response saved to display_messages AND message_history
+    - st.rerun() called → final clean render
+
+  STEP 12 — Next message
+    - User can now type again
+    - history now contains: [HumanMessage("Hello"), AIMessage("Hi there! ...")]
+    - Next prompt will include this history for full context
+
+
+================================================================================
+  PART 5 — RAG READINESS (WHAT CHANGES IN v0.3)
+================================================================================
+
+v0.2 current flow:
+  User Question → Prompt → Mistral → Answer
+
+v0.3 RAG flow:
+  User Question
+       |
+       ├──→ Embed question → Search Vector DB → Get relevant document chunks
+       |
+       v
+  Context + History + Question → Prompt → Mistral → Answer (with sources)
+
+Files to ADD in v0.3:
+  src/embeddings.py   → Load a local embedding model (e.g. sentence-transformers)
+  src/vectorstore.py  → ChromaDB or FAISS vector store management
+  src/retriever.py    → Similarity search, returning top-k document chunks
+
+Files to MODIFY in v0.3 (minimal changes):
+  src/chains.py  → Add retriever to the chain input
+  src/prompts.py → Add {context} slot to template
+
+Files that DON'T CHANGE at all:
+  config.py, llm.py, memory.py, parsers.py, utils.py, app.py
+
+This is why the architecture was designed this way — maximum extensibility
+with minimum code change to go from v0.2 → v0.3.
+
+
+================================================================================
+  PART 6 — GLOSSARY OF KEY TERMS
+================================================================================
+
+  API          → Application Programming Interface. A way for code to call
+                 external services (e.g. OpenAI's API). We don't use one.
+
+  GGUF         → GPT-Generated Unified Format. Binary file format for local LLMs.
+
+  Quantization → Reducing model weight precision (32-bit → 3-bit) to shrink
+                 memory usage at some quality cost.
+
+  Q3_K_S       → 3-bit K-quant, Small variant. Our chosen quantization.
+
+  llama.cpp    → C++ engine for running GGUF models on CPU.
+
+  LangChain    → Python framework with abstractions for LLM applications.
+
+  LCEL         → LangChain Expression Language. Pipeline composition with |.
+
+  Runnable     → Any LangChain component with .invoke(), .stream(), .batch().
+
+  ChatPromptTemplate → Template that structures system + history + user input.
+
+  MessagesPlaceholder → A template slot that accepts a dynamic list of messages.
+
+  HumanMessage → A LangChain message object representing a user turn.
+
+  AIMessage    → A LangChain message object representing an assistant turn.
+
+  ChatMessageHistory → LangChain container for conversation history.
+
+  StrOutputParser → Extracts clean string from LLM output.
+
+  Streaming    → Receiving and displaying tokens one by one as they're generated.
+
+  Generator    → Python object created with "yield". Produces values lazily.
+
+  Streamlit    → Python library for building web UIs without JavaScript.
+
+  session_state → Streamlit's dictionary for persisting data across re-runs.
+
+  cache_resource → Streamlit decorator to run expensive functions only once.
+
+  RAG          → Retrieval-Augmented Generation. Giving the LLM relevant
+                 documents to base its answers on.
+
+  Vector Store → A database optimized for similarity search on embeddings.
+
+  Embedding    → A numerical vector (list of numbers) representing text meaning.
+
+  Token        → The basic unit an LLM processes. Roughly 0.75 words.
+                 "Hello world" ≈ 2 tokens. "Quantization" ≈ 3 tokens.
+
+  Context Window → Maximum tokens an LLM can "see" at once (input + output).
+                   Our limit: 4096 tokens ≈ ~3000 words total.
+
+  Temperature  → Controls randomness. 0.0 = deterministic, 1.5 = very random.
+
+  Inference    → Running the model to generate text (vs. "training" a model).
+
+  uv           → Fast modern Python package manager (replacement for pip).
+
+  .env         → File containing environment variables (private config values).
+
+  pyproject.toml → Python project configuration file (dependencies, build info).
+
+  PEP 8        → Python coding style guide (naming, spacing, line length).
+
+  Type hints   → Optional annotations like "def foo(x: int) -> str:" that
+                 document expected types without enforcing them at runtime.
+
+================================================================================
+  END OF LEARNING GUIDE
+  Local Mistral Chatbot v0.2
+================================================================================
