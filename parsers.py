@@ -3,6 +3,7 @@ parsers.py — Output Parsers
 
 This module demonstrates LangChain's output parsing layer.
 
+
 WHY OUTPUT PARSERS?
   When the LLM generates a response, it returns a raw object —
   a LangChain AIMessage or a string, depending on the LLM type.
