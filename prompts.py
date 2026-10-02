@@ -1,6 +1,7 @@
 """
 prompts.py — Prompt Templates
 
+
 This module defines how we structure the conversation before sending it to
 the model. This is one of the most important parts of any LangChain application.
 
