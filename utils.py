@@ -1,6 +1,7 @@
 """
 utils.py — Helper Functions and Validation
 
+
 This module contains utility functions used across the application.
 Keeping these here prevents code duplication and keeps other modules focused.
 """
